@@ -12,6 +12,7 @@ import {
   Animated,
   Dimensions,
   PermissionsAndroid,
+  Linking,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'react-native-image-picker';
@@ -21,7 +22,24 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import RNFS from 'react-native-fs';
-import { Image as RNImage } from 'react-native';
+import { Platform } from 'react-native';
+import { TwitterApi } from 'twitter-api-v2';
+import {
+  TWITTER_API_KEY,
+  TWITTER_API_SECRET,
+  TWITTER_CLIENT_ID,
+  TWITTER_CLIENT_SECRET,
+  TWITTER_REDIRECT_URI,
+} from '@env';
+
+
+console.log('Environment variables:', {
+  TWITTER_API_KEY,
+  TWITTER_API_SECRET,
+  TWITTER_CLIENT_ID,
+  TWITTER_CLIENT_SECRET,
+  TWITTER_REDIRECT_URI,
+});
 
 // Define navigation param list
 type RootStackParamList = {
@@ -30,7 +48,6 @@ type RootStackParamList = {
   Home: { email: string };
   EditProfile: { email: string };
   Users: undefined;
-  Feed: { email: string };
 };
 
 // Define screen props
@@ -39,7 +56,6 @@ type SignupScreenProps = NativeStackScreenProps<RootStackParamList, 'Signup'>;
 type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 type EditProfileScreenProps = NativeStackScreenProps<RootStackParamList, 'EditProfile'>;
 type UsersScreenProps = NativeStackScreenProps<RootStackParamList, 'Users'>;
-type FeedScreenProps = NativeStackScreenProps<RootStackParamList, 'Feed'>;
 
 // Set up stack navigator
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -59,10 +75,13 @@ type Post = {
   content: string;
   timestamp: string;
   image?: string;
+  isTwitter?: boolean;
+  twitterId?: string;
+  conversationId?: string;
 };
 
 // Default profile image
-const DEFAULT_PROFILE_IMAGE = require('./assets/default-avatar-icon-of-social-media-user-vector.jpg');
+const DEFAULT_PROFILE_IMAGE = 'default-avatar-icon-of-social-media-user-vector.jpg';
 
 // Utility function to convert image to base64 with mime type
 const imageToBase64 = async (imagePath: string): Promise<string> => {
@@ -71,7 +90,7 @@ const imageToBase64 = async (imagePath: string): Promise<string> => {
     let mimeType = 'image/jpeg';
     if (extension === 'png') mimeType = 'image/png';
     else if (extension === 'gif') mimeType = 'image/gif';
-    else if (extension === ' jpg') mimeType = 'image/jpg';
+    else if (extension === 'jpg') mimeType = 'image/jpeg';
 
     const base64String = await RNFS.readFile(imagePath, 'base64');
     return `data:${mimeType};base64,${base64String}`;
@@ -82,20 +101,28 @@ const imageToBase64 = async (imagePath: string): Promise<string> => {
 };
 
 // Convert asset to base64
-const assetToBase64 = async (asset: any): Promise<string> => {
+const assetToBase64 = async (fileName: string): Promise<string> => {
   try {
-    // Resolve asset source to get URI
-    const assetSource = RNImage.resolveAssetSource(asset);
-    // console.log("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ assetSource")
-    // console.log(assetSource)
-    // if (!assetSource || !assetSource.uri) {
-    //   throw new Error('Unable to resolve asset source');
-    // }
-    // return await imageToBase64(assetSource.uri);
-    return await imageToBase64('/Users/biplabdholey/Documents/Projects/AuthApp/assets/default-avatar-icon-of-social-media-user-vector.jpg')
+    const destPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
+    console.log(`Copying asset to: ${destPath}`);
+    try {
+      if (Platform.OS === 'android') {
+        await RNFS.copyFileAssets(fileName, destPath);
+        console.log('Copied asset for Android');
+      } else if (Platform.OS === 'ios') {
+        const sourcePath = `${RNFS.MainBundlePath}/${fileName}`;
+        console.log(`Copying from iOS bundle: ${sourcePath}`);
+        await RNFS.copyFile(sourcePath, destPath);
+        console.log('Copied asset for iOS');
+      }
+      const base64 = await RNFS.readFile(destPath, 'base64');
+      return `data:image/jpeg;base64,${base64}`;
+    } catch (err) {
+      console.error('Base64 error:', err);
+      return '';
+    }
   } catch (error) {
     console.error('Error converting asset to base64:', error);
-    // Fallback to a hardcoded base64 string or empty string
     return '';
   }
 };
@@ -247,17 +274,125 @@ const AuthService = {
   },
   async getPosts(): Promise<Post[]> {
     try {
-      const response = await AuthService.makeAuthenticatedRequest('http://10.0.2.2:5000/api/posts', {
-        method: 'GET',
-      });
-      const data = await response.json();
-      if (response.ok) {
-        return data.posts;
-      }
-      throw new Error(data.message || 'Network error');
+      return [{
+        id: "local1",
+        content: "Sample local post",
+        image: "",
+        username: "localuser",
+        timestamp: new Date().toISOString()
+      }];
     } catch (error) {
       console.error('Get posts error:', error);
       throw error;
+    }
+  },
+  async initiateTwitterAuth(): Promise<string> {
+    const twitterClient = new TwitterApi({
+      clientId: TWITTER_CLIENT_ID,
+      clientSecret: TWITTER_CLIENT_SECRET,
+    });
+    const authLink = twitterClient.generateOAuth2AuthLink(TWITTER_REDIRECT_URI, {
+      scope: ['tweet.read', 'tweet.write', 'users.read', 'like.read', 'like.write'],
+    });
+    await AsyncStorage.setItem('twitterCodeVerifier', authLink.codeVerifier);
+    return authLink.url;
+  },
+  async completeTwitterAuth(code: string): Promise<string | null> {
+    try {
+      const codeVerifier = await AsyncStorage.getItem('twitterCodeVerifier');
+      if (!codeVerifier) {
+        throw new Error('No code verifier found');
+      }
+      const twitterClient = new TwitterApi({
+        clientId: TWITTER_CLIENT_ID,
+        clientSecret: TWITTER_CLIENT_SECRET,
+      });
+      const { accessToken } = await twitterClient.loginWithOAuth2({
+        code,
+        codeVerifier,
+        redirectUri: TWITTER_REDIRECT_URI,
+      });
+      await AsyncStorage.setItem('twitterAccessToken', accessToken);
+      return accessToken;
+    } catch (error) {
+      console.error('Twitter auth error:', error);
+      return null;
+    }
+  },
+  async fetchTwitterFeed(accessToken: string, query: string = 'from:username'): Promise<Post[]> {
+    try {
+      const twitterClient = new TwitterApi(accessToken);
+      const tweets = await twitterClient.v2.search(query, { max_results: 10 });
+      const posts: Post[] = [];
+      for await (const tweet of tweets) {
+        posts.push({
+          id: tweet.id,
+          username: tweet.author_id || 'Unknown',
+          content: tweet.text,
+          timestamp: tweet.created_at || new Date().toISOString(),
+          isTwitter: true,
+          twitterId: tweet.id,
+          conversationId: tweet.conversation_id,
+        });
+      }
+      return posts;
+    } catch (error) {
+      console.error('Fetch Twitter feed error:', error);
+      return [];
+    }
+  },
+  async postTwitterComment(accessToken: string, tweetId: string, comment: string): Promise<boolean> {
+    try {
+      const twitterClient = new TwitterApi(accessToken);
+      await twitterClient.v2.tweet({
+        text: comment,
+        reply: { in_reply_to_tweet_id: tweetId },
+      });
+      return true;
+    } catch (error) {
+      console.error('Post Twitter comment error:', error);
+      return false;
+    }
+  },
+  async likeTwitterPost(accessToken: string, userId: string, tweetId: string): Promise<boolean> {
+    try {
+      const twitterClient = new TwitterApi(accessToken);
+      await twitterClient.v2.like(userId, tweetId);
+      return true;
+    } catch (error) {
+      console.error('Like Twitter post error:', error);
+      return false;
+    }
+  },
+  async unlikeTwitterPost(accessToken: string, userId: string, tweetId: string): Promise<boolean> {
+    try {
+      const twitterClient = new TwitterApi(accessToken);
+      await twitterClient.v2.unlike(userId, tweetId);
+      return true;
+    } catch (error) {
+      console.error('Unlike Twitter post error:', error);
+      return false;
+    }
+  },
+  async fetchTwitterReplies(accessToken: string, conversationId: string): Promise<Post[]> {
+    try {
+      const twitterClient = new TwitterApi(accessToken);
+      const replies = await twitterClient.v2.search(`conversation_id:${conversationId}`, { max_results: 10 });
+      const posts: Post[] = [];
+      for await (const reply of replies) {
+        posts.push({
+          id: reply.id,
+          username: reply.author_id || 'Unknown',
+          content: reply.text,
+          timestamp: reply.created_at || new Date().toISOString(),
+          isTwitter: true,
+          twitterId: reply.id,
+        });
+      }
+      return posts;
+    } catch (error) {
+      console.error('Fetch Twitter replies error:', error);
+      return [];
     }
   },
 };
@@ -365,6 +500,263 @@ const CustomDrawer: React.FC<{
   );
 };
 
+const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
+  const { email } = route.params;
+  const [userImage, setUserImage] = useState<string>('');
+  const [drawerVisible, setDrawerVisible] = useState(false);
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [twitterAccessToken, setTwitterAccessToken] = useState<string | null>(null);
+  const [twitterUserId, setTwitterUserId] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState<{ [key: string]: string }>({});
+  const [showReplies, setShowReplies] = useState<{ [key: string]: Post[] }>({});
+
+  useEffect(() => {
+    const loadUser = async () => {
+      try {
+        const users = await AuthService.getAllUsers();
+        const userData = users.find(u => u.email === email);
+        if (userData && userData.image) {
+          setUserImage(userData.image);
+        } else {
+          const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+          setUserImage(defaultImage);
+        }
+      } catch (error) {
+        console.error('Failed to load user image:', error);
+        const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+        setUserImage(defaultImage);
+      }
+    };
+    loadUser();
+  }, [email]);
+
+  useEffect(() => {
+    const checkTwitterAuth = async () => {
+      const token = await AsyncStorage.getItem('twitterAccessToken');
+      if (token) {
+        setTwitterAccessToken(token);
+        const twitterClient = new TwitterApi(token);
+        const user = await twitterClient.v2.me();
+        setTwitterUserId(user.data.id);
+      }
+    };
+    checkTwitterAuth();
+  }, []);
+
+  const fetchPosts = async () => {
+    try {
+      setLoading(true);
+      const localPosts = await AuthService.getPosts();
+      let twitterPosts: Post[] = [];
+      if (twitterAccessToken) {
+        twitterPosts = await AuthService.fetchTwitterFeed(twitterAccessToken, 'from:elonmusk');
+      }
+      setPosts([...localPosts, ...twitterPosts]);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to fetch posts');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPosts();
+  }, [twitterAccessToken]);
+
+  const handleTwitterLogin = async () => {
+    try {
+      const authUrl = await AuthService.initiateTwitterAuth();
+      Linking.openURL(authUrl);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to initiate Twitter login');
+    }
+  };
+
+  useEffect(() => {
+    const handleDeepLink = (event: { url: string }) => {
+      const url = new URL(event.url);
+      const code = url.searchParams.get('code');
+      if (code) {
+        AuthService.completeTwitterAuth(code).then(token => {
+          if (token) {
+            setTwitterAccessToken(token);
+            const twitterClient = new TwitterApi(token);
+            twitterClient.v2.me().then(user => {
+              setTwitterUserId(user.data.id);
+            });
+          }
+        });
+      }
+    };
+    Linking.addEventListener('url', handleDeepLink);
+    return () => {
+      Linking.removeAllListeners('url');
+    };
+  }, []);
+
+  const handleComment = async (post: Post) => {
+    if (!twitterAccessToken || !post.twitterId || !commentText[post.id]) {
+      Alert.alert('Error', 'Please log in to Twitter and enter a comment');
+      return;
+    }
+    const success = await AuthService.postTwitterComment(twitterAccessToken, post.twitterId, commentText[post.id]);
+    if (success) {
+      Alert.alert('Success', 'Comment posted');
+      setCommentText({ ...commentText, [post.id]: '' });
+      await fetchPosts(); // Reload feed
+    } else {
+      Alert.alert('Error', 'Failed to post comment');
+    }
+  };
+
+  const handleLike = async (post: Post) => {
+    if (!twitterAccessToken || !twitterUserId || !post.twitterId) {
+      Alert.alert('Error', 'Please log in to Twitter');
+      return;
+    }
+    const success = await AuthService.likeTwitterPost(twitterAccessToken, twitterUserId, post.twitterId);
+    if (success) {
+      Alert.alert('Success', 'Post liked');
+      await fetchPosts(); // Reload feed
+    } else {
+      Alert.alert('Error', 'Failed to like post');
+    }
+  };
+
+  const handleUnlike = async (post: Post) => {
+    if (!twitterAccessToken || !twitterUserId || !post.twitterId) {
+      Alert.alert('Error', 'Please log in to Twitter');
+      return;
+    }
+    const success = await AuthService.unlikeTwitterPost(twitterAccessToken, twitterUserId, post.twitterId);
+    if (success) {
+      Alert.alert('Success', 'Post unliked');
+      await fetchPosts(); // Reload feed
+    } else {
+      Alert.alert('Error', 'Failed to unlike post');
+    }
+  };
+
+  const handleViewReplies = async (post: Post) => {
+    if (!twitterAccessToken || !post.conversationId) {
+      Alert.alert('Error', 'Please log in to Twitter or select a Twitter post');
+      return;
+    }
+    const replies = await AuthService.fetchTwitterReplies(twitterAccessToken, post.conversationId);
+    setShowReplies({ ...showReplies, [post.id]: replies });
+    await fetchPosts(); // Reload feed
+  };
+
+  const toggleDrawer = () => {
+    setDrawerVisible(!drawerVisible);
+  };
+
+  const renderPost = ({ item }: { item: Post }) => (
+    <View style={styles.postTile}>
+      <View style={styles.postHeader}>
+        <Image
+          source={{ uri: item.image || '' }}
+          style={styles.postUserImage}
+          onError={async () => {
+            const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+            return { uri: defaultImage };
+          }}
+        />
+        <View>
+          <Text style={styles.postUsername}>{item.username}</Text>
+          <Text style={styles.postTimestamp}>
+            {new Date(item.timestamp).toLocaleString()}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.postContent}>{item.content}</Text>
+      {item.image && (
+        <Image source={{ uri: item.image }} style={styles.postImage} />
+      )}
+      {item.isTwitter && (
+        <View style={styles.twitterActions}>
+          <TextInput
+            style={styles.commentInput}
+            placeholder="Add a comment..."
+            placeholderTextColor="#8899A6"
+            value={commentText[item.id] || ''}
+            onChangeText={text => setCommentText({ ...commentText, [item.id]: text })}
+          />
+          <TouchableOpacity style={styles.actionButton} onPress={() => handleComment(item)}>
+            <Text style={styles.actionButtonText}>Comment</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionButton} onPress={() => handleLike(item)}>
+            <Text style={styles.actionButtonText}>Like</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionButton} onPress={() => handleUnlike(item)}>
+            <Text style={styles.actionButtonText}>Unlike</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionButton} onPress={() => handleViewReplies(item)}>
+            <Text style={styles.actionButtonText}>View Replies</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {showReplies[item.id] && (
+        <View style={styles.repliesContainer}>
+          <Text style={styles.repliesTitle}>Replies</Text>
+          {showReplies[item.id].map(reply => (
+            <View key={reply.id} style={styles.replyTile}>
+              <Text style={styles.replyUsername}>{reply.username}</Text>
+              <Text style={styles.replyContent}>{reply.content}</Text>
+              <Text style={styles.replyTimestamp}>
+                {new Date(reply.timestamp).toLocaleString()}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={toggleDrawer}>
+          <Image
+            source={{ uri: userImage }}
+            style={styles.headerProfileImage}
+            onError={async () => {
+              const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+              setUserImage(defaultImage);
+            }}
+          />
+        </TouchableOpacity>
+        {!twitterAccessToken && (
+          <TouchableOpacity style={styles.twitterLoginButton} onPress={handleTwitterLogin}>
+            <Text style={styles.twitterLoginButtonText}>Log in to Twitter</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      <View style={styles.feedContainer}>
+        {loading ? (
+          <Text style={styles.text}>Loading posts...</Text>
+        ) : (
+          <FlatList
+            data={posts}
+            renderItem={renderPost}
+            keyExtractor={(item) => item.id}
+            ListEmptyComponent={<Text style={styles.text}>No posts found</Text>}
+            contentContainerStyle={styles.listContent}
+          />
+        )}
+      </View>
+      <CustomDrawer
+        visible={drawerVisible}
+        toggleDrawer={toggleDrawer}
+        navigation={navigation}
+        email={email}
+      />
+    </View>
+  );
+};
+
+// Other components (LoginScreen, SignupScreen, EditProfileScreen, UsersScreen) remain unchanged
 const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -424,6 +816,15 @@ const SignupScreen: React.FC<SignupScreenProps> = ({ navigation }) => {
   const [image, setImage] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState<Date | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [defaultImage, setDefaultImage] = useState('');
+
+  useEffect(() => {
+    const loadDefaultImage = async () => {
+      const base64Image = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+      setDefaultImage(base64Image);
+    };
+    loadDefaultImage();
+  }, []);
 
   const handleImagePick = async () => {
     try {
@@ -493,11 +894,10 @@ const SignupScreen: React.FC<SignupScreenProps> = ({ navigation }) => {
       <Text style={styles.title}>Create account</Text>
       <View style={styles.card}>
         <TouchableOpacity style={styles.imageButton} onPress={handleImagePick}>
-          {image ? (
-            <Image source={{ uri: image }} style={styles.profileImage} />
-          ) : (
-            <Image source={DEFAULT_PROFILE_IMAGE} style={styles.profileImage} />
-          )}
+          <Image
+            source={{ uri: image || defaultImage }}
+            style={styles.profileImage}
+          />
         </TouchableOpacity>
         <TextInput
           style={styles.input}
@@ -564,121 +964,6 @@ const SignupScreen: React.FC<SignupScreenProps> = ({ navigation }) => {
   );
 };
 
-const FeedScreen: React.FC<FeedScreenProps> = ({ route }) => {
-  const { email } = route.params;
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchPosts = async () => {
-      try {
-        const postList = await AuthService.getPosts();
-        setPosts(postList);
-      } catch (error: any) {
-        Alert.alert('Error', error.message || 'Failed to fetch posts');
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchPosts();
-  }, []);
-
-  const renderPost = ({ item }: { item: Post }) => (
-    <View style={styles.postTile}>
-      <View style={styles.postHeader}>
-        <Image
-          source={{ uri: item.image || '' }}
-          style={styles.postUserImage}
-          onError={async () => {
-            const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
-            return { uri: defaultImage };
-          }}
-        />
-        <View>
-          <Text style={styles.postUsername}>{item.username}</Text>
-          <Text style={styles.postTimestamp}>
-            {new Date(item.timestamp).toLocaleString()}
-          </Text>
-        </View>
-      </View>
-      <Text style={styles.postContent}>{item.content}</Text>
-      {item.image && (
-        <Image source={{ uri: item.image }} style={styles.postImage} />
-      )}
-    </View>
-  );
-
-  return (
-    <View style={styles.feedContainer}>
-      {loading ? (
-        <Text style={styles.text}>Loading posts...</Text>
-      ) : (
-        <FlatList
-          data={posts}
-          renderItem={renderPost}
-          keyExtractor={(item) => item.id}
-          ListEmptyComponent={<Text style={styles.text}>No posts found</Text>}
-          contentContainerStyle={styles.listContent}
-        />
-      )}
-    </View>
-  );
-};
-
-const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
-  const { email } = route.params;
-  const [userImage, setUserImage] = useState<string>('');
-  const [drawerVisible, setDrawerVisible] = useState(false);
-
-  useEffect(() => {
-    const loadUser = async () => {
-      try {
-        const users = await AuthService.getAllUsers();
-        const userData = users.find(u => u.email === email);
-        if (userData && userData.image) {
-          setUserImage(userData.image);
-        } else {
-          const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
-          setUserImage(defaultImage);
-        }
-      } catch (error) {
-        console.error('Failed to load user image:', error);
-        const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
-        setUserImage(defaultImage);
-      }
-    };
-    loadUser();
-  }, [email]);
-
-  const toggleDrawer = () => {
-    setDrawerVisible(!drawerVisible);
-  };
-
-  return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={toggleDrawer}>
-          <Image
-            source={{ uri: userImage }}
-            style={styles.headerProfileImage}
-            onError={async () => {
-              const defaultImage = await assetToBase64(DEFAULT_PROFILE_IMAGE);
-              setUserImage(defaultImage);
-            }}
-          />
-        </TouchableOpacity>
-      </View>
-      <FeedScreen route={{ params: { email } }} navigation={navigation} />
-      <CustomDrawer
-        visible={drawerVisible}
-        toggleDrawer={toggleDrawer}
-        navigation={navigation}
-        email={email}
-      />
-    </View>
-  );
-};
-
 const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route }) => {
   const { email } = route.params;
   const [user, setUser] = useState<User | null>(null);
@@ -688,6 +973,7 @@ const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route
   const [dateOfBirth, setDateOfBirth] = useState<Date | null>(null);
   const [image, setImage] = useState('');
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [defaultImage, setDefaultImage] = useState('');
 
   useEffect(() => {
     const loadUser = async () => {
@@ -701,6 +987,8 @@ const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route
           setPhone(userData.phone || '');
           setDateOfBirth(userData.dateOfBirth ? new Date(userData.dateOfBirth) : null);
           setImage(userData.image || '');
+          const base64Image = await assetToBase64(DEFAULT_PROFILE_IMAGE);
+          setDefaultImage(base64Image);
         }
       } catch (error) {
         Alert.alert('Error', 'Failed to load user data');
@@ -771,11 +1059,10 @@ const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route
       <View style={styles.card}>
         <Text style={styles.label}>Profile Image</Text>
         <TouchableOpacity style={styles.imageButton} onPress={handleImagePick}>
-          {image ? (
-            <Image source={{ uri: image }} style={styles.profileImage} />
-          ) : (
-            <Image source={DEFAULT_PROFILE_IMAGE} style={styles.profileImage} />
-          )}
+          <Image
+            source={{ uri: image || defaultImage }}
+            style={styles.profileImage}
+          />
         </TouchableOpacity>
         <TextInput
           style={styles.input}
@@ -890,13 +1177,18 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#15202B',
+    paddingHorizontal: 0,
+    paddingTop: 24,
+    justifyContent: 'center',
   },
   header: {
-    height: Dimensions.get('window').height * 0.1,
+    height: Dimensions.get('window').height * 0.12,
     backgroundColor: '#192734',
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    justifyContent: 'space-between',
+    paddingHorizontal: 0,
+    paddingTop: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#38444D',
   },
@@ -905,16 +1197,30 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     backgroundColor: '#253341',
+    marginLeft: 0,
+  },
+  twitterLoginButton: {
+    backgroundColor: '#1DA1F2',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    marginRight: 8,
+  },
+  twitterLoginButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '500',
   },
   feedContainer: {
     flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingHorizontal: 0,
+    paddingTop: 40,
   },
   postTile: {
     backgroundColor: '#192734',
     borderRadius: 8,
     padding: 12,
+    marginHorizontal: 0,
     marginBottom: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -954,10 +1260,70 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginTop: 8,
   },
+  twitterActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  commentInput: {
+    flex: 1,
+    borderBottomWidth: 1,
+    borderBottomColor: '#38444D',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    fontSize: 14,
+    color: '#FFFFFF',
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  actionButton: {
+    backgroundColor: '#1DA1F2',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  actionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  repliesContainer: {
+    marginTop: 12,
+    paddingLeft: 16,
+  },
+  repliesTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  replyTile: {
+    backgroundColor: '#253341',
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 8,
+  },
+  replyUsername: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  replyContent: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    marginVertical: 4,
+  },
+  replyTimestamp: {
+    color: '#8899A6',
+    fontSize: 12,
+  },
   card: {
     backgroundColor: '#192734',
     borderRadius: 12,
-    padding: 16,
+    padding: 24,
+    marginHorizontal: 8,
     marginBottom: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -971,11 +1337,12 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     marginBottom: 24,
     textAlign: 'center',
+    paddingHorizontal: 16,
   },
   input: {
     borderBottomWidth: 1,
     borderBottomColor: '#38444D',
-    paddingVertical: 8,
+    paddingVertical: 12,
     paddingHorizontal: 12,
     fontSize: 16,
     color: '#FFFFFF',
@@ -1040,11 +1407,8 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     textAlign: 'center',
   },
-  emailText: {
-    marginBottom: 16,
-  },
   listContent: {
-    paddingBottom: 16,
+    paddingBottom: 8,
   },
   imageButton: {
     alignItems: 'center',
@@ -1052,10 +1416,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#253341',
     borderRadius: 8,
     padding: 12,
-    marginBottom: 16,
-  },
-  profileImageContainer: {
-    alignItems: 'center',
     marginBottom: 16,
   },
   profileImage: {
@@ -1118,7 +1478,6 @@ export default function App() {
           <Stack.Screen name="Home" component={HomeScreen} />
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
           <Stack.Screen name="Users" component={UsersScreen} />
-          <Stack.Screen name="Feed" component={FeedScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>
