@@ -13,6 +13,7 @@ import {
   Dimensions,
   PermissionsAndroid,
   Linking,
+  Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'react-native-image-picker';
@@ -22,24 +23,25 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import RNFS from 'react-native-fs';
-import { Platform } from 'react-native';
-import { TwitterApi } from 'twitter-api-v2';
-import {
-  TWITTER_API_KEY,
-  TWITTER_API_SECRET,
-  TWITTER_CLIENT_ID,
-  TWITTER_CLIENT_SECRET,
-  TWITTER_REDIRECT_URI,
-} from '@env';
+import { authorize } from 'react-native-app-auth';
+import * as Keychain from 'react-native-keychain';
 
+// const API_BASE_URL = 'http://localhost:5000/api';
 
-console.log('Environment variables:', {
-  TWITTER_API_KEY,
-  TWITTER_API_SECRET,
-  TWITTER_CLIENT_ID,
-  TWITTER_CLIENT_SECRET,
-  TWITTER_REDIRECT_URI,
-});
+const API_BASE_URL = 'https://live-feed-socials-926fb17c8f89.herokuapp.com/api';
+
+// Twitter OAuth 2.0 configuration
+const twitterConfig = {
+  clientId: 'Z1A1LWZVWHZRRXlZNl95Nm5WVnk6MTpjaQ', // Replace with your Twitter client ID
+  redirectUrl: 'mylivefeed://callback',
+  scopes: ['tweet.read', 'tweet.write', 'users.read', 'like.read', 'like.write', 'offline.access'],
+  serviceConfiguration: {
+    authorizationEndpoint: 'https://twitter.com/i/oauth2/authorize',
+    tokenEndpoint: 'https://api.twitter.com/2/oauth2/token',
+  },
+  usePKCE: true, // Enable PKCE
+  // No additionalParameters needed for code_challenge_method
+};
 
 // Define navigation param list
 type RootStackParamList = {
@@ -129,17 +131,19 @@ const assetToBase64 = async (fileName: string): Promise<string> => {
 
 // AuthService with API calls
 const AuthService = {
-  async login(email: string, password: string): Promise<{ user: User; accessToken: string; refreshToken: string } | null> {
+  async login(email: string, password: string): Promise<{ user: User; accessToken: string; refreshToken: string; sessionId: string } | null> {
     try {
-      const response = await fetch('http://10.0.2.2:5000/api/login', {
+      const response = await fetch(`${API_BASE_URL}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
+
       const data = await response.json();
       if (response.ok) {
         await AsyncStorage.setItem('accessToken', data.accessToken);
         await AsyncStorage.setItem('refreshToken', data.refreshToken);
+        await AsyncStorage.setItem('sessionId', data.sessionId);
         return data;
       }
       throw new Error(data.message || 'Network error');
@@ -150,7 +154,7 @@ const AuthService = {
   },
   async signup(user: User & { password: string }): Promise<boolean> {
     try {
-      const response = await fetch('http://10.0.2.2:5000/api/signup', {
+      const response = await fetch(`${API_BASE_URL}/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(user),
@@ -167,13 +171,14 @@ const AuthService = {
   async refreshToken(): Promise<string | null> {
     try {
       const refreshToken = await AsyncStorage.getItem('refreshToken');
-      if (!refreshToken) {
-        throw new Error('No refresh token available');
+      const sessionId = await AsyncStorage.getItem('sessionId');
+      if (!refreshToken || !sessionId) {
+        throw new Error('No refresh token or session ID available');
       }
-      const response = await fetch('http://10.0.2.2:5000/api/refresh', {
+      const response = await fetch(`${API_BASE_URL}/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken }),
+        body: JSON.stringify({ refreshToken, sessionId }),
       });
       const data = await response.json();
       if (response.ok) {
@@ -185,6 +190,8 @@ const AuthService = {
       console.error('Refresh token error:', error);
       await AsyncStorage.removeItem('accessToken');
       await AsyncStorage.removeItem('refreshToken');
+      await AsyncStorage.removeItem('sessionId');
+      await AsyncStorage.removeItem('twitterUserId');
       return null;
     }
   },
@@ -213,7 +220,7 @@ const AuthService = {
   },
   async updateProfile(user: User): Promise<User> {
     try {
-      const response = await AuthService.makeAuthenticatedRequest('http://10.0.2.2:5000/api/profile', {
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/profile`, {
         method: 'PUT',
         body: JSON.stringify(user),
       });
@@ -229,13 +236,15 @@ const AuthService = {
   },
   async deleteAccount(email: string): Promise<void> {
     try {
-      const response = await AuthService.makeAuthenticatedRequest('http://10.0.2.2:5000/api/profile', {
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/profile`, {
         method: 'DELETE',
         body: JSON.stringify({ email }),
       });
       if (!response.ok) {
         throw new Error((await response.json()).message || 'Network error');
       }
+      await AsyncStorage.removeItem('sessionId');
+      await AsyncStorage.removeItem('twitterUserId');
     } catch (error) {
       console.error('Delete account error:', error);
       throw error;
@@ -243,12 +252,14 @@ const AuthService = {
   },
   async logout(): Promise<void> {
     try {
-      const response = await AuthService.makeAuthenticatedRequest('http://10.0.2.2:5000/api/logout', {
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/logout`, {
         method: 'POST',
       });
       if (response.ok) {
         await AsyncStorage.removeItem('accessToken');
         await AsyncStorage.removeItem('refreshToken');
+        await AsyncStorage.removeItem('sessionId');
+        await AsyncStorage.removeItem('twitterUserId');
       } else {
         throw new Error((await response.json()).message || 'Logout failed');
       }
@@ -259,7 +270,7 @@ const AuthService = {
   },
   async getAllUsers(): Promise<User[]> {
     try {
-      const response = await AuthService.makeAuthenticatedRequest('http://10.0.2.2:5000/api/users', {
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/users`, {
         method: 'GET',
       });
       const data = await response.json();
@@ -286,46 +297,51 @@ const AuthService = {
       throw error;
     }
   },
-  async initiateTwitterAuth(): Promise<string> {
-    const twitterClient = new TwitterApi({
-      clientId: TWITTER_CLIENT_ID,
-      clientSecret: TWITTER_CLIENT_SECRET,
-    });
-    const authLink = twitterClient.generateOAuth2AuthLink(TWITTER_REDIRECT_URI, {
-      scope: ['tweet.read', 'tweet.write', 'users.read', 'like.read', 'like.write'],
-    });
-    await AsyncStorage.setItem('twitterCodeVerifier', authLink.codeVerifier);
-    return authLink.url;
-  },
-  async completeTwitterAuth(code: string): Promise<string | null> {
+  async initiateTwitterAuth(): Promise<void> {
     try {
-      const codeVerifier = await AsyncStorage.getItem('twitterCodeVerifier');
-      if (!codeVerifier) {
-        throw new Error('No code verifier found');
+      const result = await authorize(twitterConfig);
+      // Fetch Twitter user data
+      const userResponse = await fetch('https://api.twitter.com/2/users/me', {
+        headers: {
+          Authorization: `Bearer ${result.accessToken}`,
+        },
+      });
+      const userData = await userResponse.json();
+      if (!userResponse.ok) {
+        throw new Error(userData.message || 'Failed to fetch user data');
       }
-      const twitterClient = new TwitterApi({
-        clientId: TWITTER_CLIENT_ID,
-        clientSecret: TWITTER_CLIENT_SECRET,
+      // Store Twitter user ID securely
+      await Keychain.setGenericPassword('twitterUserId', userData.data.id);
+      // Send tokens to backend for session storage
+      const sessionId = await AsyncStorage.getItem('sessionId');
+      if (!sessionId) {
+        throw new Error('No session ID available');
+      }
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/store-token`, {
+        method: 'POST',
+        body: JSON.stringify({
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken || '',
+          expiresIn: Math.floor((new Date(result.accessTokenExpirationDate).getTime() - Date.now()) / 1000),
+          twitterUserId: userData.data.id,
+        }),
       });
-      const { accessToken } = await twitterClient.loginWithOAuth2({
-        code,
-        codeVerifier,
-        redirectUri: TWITTER_REDIRECT_URI,
-      });
-      await AsyncStorage.setItem('twitterAccessToken', accessToken);
-      return accessToken;
+      if (!response.ok) {
+        throw new Error((await response.json()).message || 'Failed to store Twitter token');
+      }
     } catch (error) {
       console.error('Twitter auth error:', error);
-      return null;
+      throw error;
     }
   },
-  async fetchTwitterFeed(accessToken: string, query: string = 'from:username'): Promise<Post[]> {
+  async fetchTwitterFeed(): Promise<Post[]> {
     try {
-      const twitterClient = new TwitterApi(accessToken);
-      const tweets = await twitterClient.v2.search(query, { max_results: 10 });
-      const posts: Post[] = [];
-      for await (const tweet of tweets) {
-        posts.push({
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/tweets`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (response.ok) {
+        return data.tweets.map((tweet: any) => ({
           id: tweet.id,
           username: tweet.author_id || 'Unknown',
           content: tweet.text,
@@ -333,63 +349,80 @@ const AuthService = {
           isTwitter: true,
           twitterId: tweet.id,
           conversationId: tweet.conversation_id,
-        });
+        }));
       }
-      return posts;
+      throw new Error(data.message || 'Failed to fetch tweets');
     } catch (error) {
       console.error('Fetch Twitter feed error:', error);
       return [];
     }
   },
-  async postTwitterComment(accessToken: string, tweetId: string, comment: string): Promise<boolean> {
+  async postTwitterComment(tweetId: string, comment: string): Promise<boolean> {
     try {
-      const twitterClient = new TwitterApi(accessToken);
-      await twitterClient.v2.tweet({
-        text: comment,
-        reply: { in_reply_to_tweet_id: tweetId },
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/tweet`, {
+        method: 'POST',
+        body: JSON.stringify({ text: comment, reply: { in_reply_to_tweet_id: tweetId } }),
       });
-      return true;
+      const data = await response.json();
+      if (response.ok) {
+        return true;
+      }
+      throw new Error(data.message || 'Failed to post comment');
     } catch (error) {
       console.error('Post Twitter comment error:', error);
       return false;
     }
   },
-  async likeTwitterPost(accessToken: string, userId: string, tweetId: string): Promise<boolean> {
+  async likeTwitterPost(tweetId: string): Promise<boolean> {
     try {
-      const twitterClient = new TwitterApi(accessToken);
-      await twitterClient.v2.like(userId, tweetId);
-      return true;
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/like`, {
+        method: 'POST',
+        body: JSON.stringify({ tweetId }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        return true;
+      }
+      throw new Error(data.message || 'Failed to like post');
     } catch (error) {
       console.error('Like Twitter post error:', error);
       return false;
     }
   },
-  async unlikeTwitterPost(accessToken: string, userId: string, tweetId: string): Promise<boolean> {
+  async unlikeTwitterPost(tweetId: string): Promise<boolean> {
     try {
-      const twitterClient = new TwitterApi(accessToken);
-      await twitterClient.v2.unlike(userId, tweetId);
-      return true;
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/unlike`, {
+        method: 'POST',
+        body: JSON.stringify({ tweetId }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        return true;
+      }
+      throw new Error(data.message || 'Failed to unlike post');
     } catch (error) {
       console.error('Unlike Twitter post error:', error);
       return false;
     }
   },
-  async fetchTwitterReplies(accessToken: string, conversationId: string): Promise<Post[]> {
+  async fetchTwitterReplies(conversationId: string): Promise<Post[]> {
     try {
-      const twitterClient = new TwitterApi(accessToken);
-      const replies = await twitterClient.v2.search(`conversation_id:${conversationId}`, { max_results: 10 });
-      const posts: Post[] = [];
-      for await (const reply of replies) {
-        posts.push({
+      const response = await AuthService.makeAuthenticatedRequest(`${API_BASE_URL}/twitter/tweets`, {
+        method: 'GET',
+        body: JSON.stringify({ conversationId }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        return data.tweets.map((reply: any) => ({
           id: reply.id,
           username: reply.author_id || 'Unknown',
           content: reply.text,
           timestamp: reply.created_at || new Date().toISOString(),
           isTwitter: true,
           twitterId: reply.id,
-        });
+        }));
       }
-      return posts;
+      throw new Error(data.message || 'Failed to fetch replies');
     } catch (error) {
       console.error('Fetch Twitter replies error:', error);
       return [];
@@ -397,7 +430,7 @@ const AuthService = {
   },
 };
 
-// Custom Drawer Component
+// Custom Drawer Component (unchanged)
 const CustomDrawer: React.FC<{
   visible: boolean;
   toggleDrawer: () => void;
@@ -506,7 +539,6 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
-  const [twitterAccessToken, setTwitterAccessToken] = useState<string | null>(null);
   const [twitterUserId, setTwitterUserId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState<{ [key: string]: string }>({});
   const [showReplies, setShowReplies] = useState<{ [key: string]: Post[] }>({});
@@ -533,12 +565,10 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
 
   useEffect(() => {
     const checkTwitterAuth = async () => {
-      const token = await AsyncStorage.getItem('twitterAccessToken');
-      if (token) {
-        setTwitterAccessToken(token);
-        const twitterClient = new TwitterApi(token);
-        const user = await twitterClient.v2.me();
-        setTwitterUserId(user.data.id);
+      const credentials = await Keychain.getGenericPassword();
+      const userId = credentials && credentials.username === 'twitterUserId' ? credentials.password : null;
+      if (userId) {
+        setTwitterUserId(userId);
       }
     };
     checkTwitterAuth();
@@ -549,8 +579,8 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
       setLoading(true);
       const localPosts = await AuthService.getPosts();
       let twitterPosts: Post[] = [];
-      if (twitterAccessToken) {
-        twitterPosts = await AuthService.fetchTwitterFeed(twitterAccessToken, 'from:elonmusk');
+      if (twitterUserId) {
+        twitterPosts = await AuthService.fetchTwitterFeed();
       }
       setPosts([...localPosts, ...twitterPosts]);
     } catch (error: any) {
@@ -562,90 +592,73 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
 
   useEffect(() => {
     fetchPosts();
-  }, [twitterAccessToken]);
+  }, [twitterUserId]);
 
   const handleTwitterLogin = async () => {
     try {
-      const authUrl = await AuthService.initiateTwitterAuth();
-      Linking.openURL(authUrl);
-    } catch (error) {
-      Alert.alert('Error', 'Failed to initiate Twitter login');
+      await AuthService.initiateTwitterAuth();
+      const credentials = await Keychain.getGenericPassword();
+      const userId = credentials && credentials.username === 'twitterUserId' ? credentials.password : null;
+      if (userId) {
+        setTwitterUserId(userId);
+        fetchPosts();
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to initiate Twitter login');
     }
   };
 
-  useEffect(() => {
-    const handleDeepLink = (event: { url: string }) => {
-      const url = new URL(event.url);
-      const code = url.searchParams.get('code');
-      if (code) {
-        AuthService.completeTwitterAuth(code).then(token => {
-          if (token) {
-            setTwitterAccessToken(token);
-            const twitterClient = new TwitterApi(token);
-            twitterClient.v2.me().then(user => {
-              setTwitterUserId(user.data.id);
-            });
-          }
-        });
-      }
-    };
-    Linking.addEventListener('url', handleDeepLink);
-    return () => {
-      Linking.removeAllListeners('url');
-    };
-  }, []);
-
   const handleComment = async (post: Post) => {
-    if (!twitterAccessToken || !post.twitterId || !commentText[post.id]) {
+    if (!twitterUserId || !post.twitterId || !commentText[post.id]) {
       Alert.alert('Error', 'Please log in to Twitter and enter a comment');
       return;
     }
-    const success = await AuthService.postTwitterComment(twitterAccessToken, post.twitterId, commentText[post.id]);
+    const success = await AuthService.postTwitterComment(post.twitterId, commentText[post.id]);
     if (success) {
       Alert.alert('Success', 'Comment posted');
       setCommentText({ ...commentText, [post.id]: '' });
-      await fetchPosts(); // Reload feed
+      await fetchPosts();
     } else {
       Alert.alert('Error', 'Failed to post comment');
     }
   };
 
   const handleLike = async (post: Post) => {
-    if (!twitterAccessToken || !twitterUserId || !post.twitterId) {
+    if (!twitterUserId || !post.twitterId) {
       Alert.alert('Error', 'Please log in to Twitter');
       return;
     }
-    const success = await AuthService.likeTwitterPost(twitterAccessToken, twitterUserId, post.twitterId);
+    const success = await AuthService.likeTwitterPost(post.twitterId);
     if (success) {
       Alert.alert('Success', 'Post liked');
-      await fetchPosts(); // Reload feed
+      await fetchPosts();
     } else {
       Alert.alert('Error', 'Failed to like post');
     }
   };
 
   const handleUnlike = async (post: Post) => {
-    if (!twitterAccessToken || !twitterUserId || !post.twitterId) {
+    if (!twitterUserId || !post.twitterId) {
       Alert.alert('Error', 'Please log in to Twitter');
       return;
     }
-    const success = await AuthService.unlikeTwitterPost(twitterAccessToken, twitterUserId, post.twitterId);
+    const success = await AuthService.unlikeTwitterPost(post.twitterId);
     if (success) {
       Alert.alert('Success', 'Post unliked');
-      await fetchPosts(); // Reload feed
+      await fetchPosts();
     } else {
       Alert.alert('Error', 'Failed to unlike post');
     }
   };
 
   const handleViewReplies = async (post: Post) => {
-    if (!twitterAccessToken || !post.conversationId) {
+    if (!twitterUserId || !post.conversationId) {
       Alert.alert('Error', 'Please log in to Twitter or select a Twitter post');
       return;
     }
-    const replies = await AuthService.fetchTwitterReplies(twitterAccessToken, post.conversationId);
+    const replies = await AuthService.fetchTwitterReplies(post.conversationId);
     setShowReplies({ ...showReplies, [post.id]: replies });
-    await fetchPosts(); // Reload feed
+    await fetchPosts();
   };
 
   const toggleDrawer = () => {
@@ -727,7 +740,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
             }}
           />
         </TouchableOpacity>
-        {!twitterAccessToken && (
+        {!twitterUserId && (
           <TouchableOpacity style={styles.twitterLoginButton} onPress={handleTwitterLogin}>
             <Text style={styles.twitterLoginButtonText}>Log in to Twitter</Text>
           </TouchableOpacity>
@@ -756,7 +769,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
   );
 };
 
-// Other components (LoginScreen, SignupScreen, EditProfileScreen, UsersScreen) remain unchanged
+// LoginScreen (unchanged)
 const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -807,6 +820,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
   );
 };
 
+// SignupScreen (unchanged)
 const SignupScreen: React.FC<SignupScreenProps> = ({ navigation }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -964,6 +978,7 @@ const SignupScreen: React.FC<SignupScreenProps> = ({ navigation }) => {
   );
 };
 
+// EditProfileScreen (unchanged)
 const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route }) => {
   const { email } = route.params;
   const [user, setUser] = useState<User | null>(null);
@@ -1112,6 +1127,7 @@ const EditProfileScreen: React.FC<EditProfileScreenProps> = ({ navigation, route
   );
 };
 
+// UsersScreen (unchanged)
 const UsersScreen: React.FC<UsersScreenProps> = ({ navigation }) => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
