@@ -27,20 +27,18 @@ import { authorize } from 'react-native-app-auth';
 import * as Keychain from 'react-native-keychain';
 
 // const API_BASE_URL = 'http://localhost:5000/api';
-
 const API_BASE_URL = 'https://live-feed-socials-926fb17c8f89.herokuapp.com/api';
 
 // Twitter OAuth 2.0 configuration
 const twitterConfig = {
-  clientId: 'Z1A1LWZVWHZRRXlZNl95Nm5WVnk6MTpjaQ', // Replace with your Twitter client ID
+  clientId: 'Z1A1LWZVWHZRRXlZNl95Nm5WVnk6MTpjaQ',
   redirectUrl: 'mylivefeed://callback',
   scopes: ['tweet.read', 'tweet.write', 'users.read', 'like.read', 'like.write', 'offline.access'],
   serviceConfiguration: {
     authorizationEndpoint: 'https://twitter.com/i/oauth2/authorize',
     tokenEndpoint: 'https://api.twitter.com/2/oauth2/token',
   },
-  usePKCE: true, // Enable PKCE
-  // No additionalParameters needed for code_challenge_method
+  usePKCE: true,
 };
 
 // Define navigation param list
@@ -84,6 +82,12 @@ type Post = {
 
 // Default profile image
 const DEFAULT_PROFILE_IMAGE = 'default-avatar-icon-of-social-media-user-vector.jpg';
+
+
+const TWITTER_CLIENT_ID = 'Z1A1LWZVWHZRRXlZNl95Nm5WVnk6MTpjaQ';
+const REDIRECT_URI = 'mylivefeed://callback'; // must be registered in Twitter dev portal + manifest
+const AUTH_ENDPOINT = 'https://twitter.com/i/oauth2/authorize';
+const TOKEN_ENDPOINT = 'https://api.twitter.com/2/oauth2/token';
 
 // Utility function to convert image to base64 with mime type
 const imageToBase64 = async (imagePath: string): Promise<string> => {
@@ -299,7 +303,9 @@ const AuthService = {
   },
   async initiateTwitterAuth(): Promise<void> {
     try {
+      console.log('Starting Twitter auth with config:', JSON.stringify(twitterConfig, null, 2));
       const result = await authorize(twitterConfig);
+      console.log('Twitter auth result:', JSON.stringify(result, null, 2));
       // Fetch Twitter user data
       const userResponse = await fetch('https://api.twitter.com/2/users/me', {
         headers: {
@@ -307,6 +313,7 @@ const AuthService = {
         },
       });
       const userData = await userResponse.json();
+      console.log('Twitter user data:', JSON.stringify(userData, null, 2));
       if (!userResponse.ok) {
         throw new Error(userData.message || 'Failed to fetch user data');
       }
@@ -326,11 +333,14 @@ const AuthService = {
           twitterUserId: userData.data.id,
         }),
       });
+      const responseData = await response.json();
+      console.log('Store token response:', JSON.stringify(responseData, null, 2));
       if (!response.ok) {
-        throw new Error((await response.json()).message || 'Failed to store Twitter token');
+        throw new Error(responseData.message || 'Failed to store Twitter token');
       }
-    } catch (error) {
-      console.error('Twitter auth error:', error);
+    } catch (error: any) {
+      console.error('Twitter auth error:', error.message, error.stack, JSON.stringify(error, null, 2));
+      Alert.alert('Twitter Auth Error', error.message || 'Failed to complete Twitter authentication');
       throw error;
     }
   },
@@ -694,7 +704,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, route }) => {
             placeholder="Add a comment..."
             placeholderTextColor="#8899A6"
             value={commentText[item.id] || ''}
-            onChangeText={text => setCommentText({ ...commentText, [item.id]: text })}
+            onChangeText={text => setCommentText({ ...commentText, [post.id]: text })}
           />
           <TouchableOpacity style={styles.actionButton} onPress={() => handleComment(item)}>
             <Text style={styles.actionButtonText}>Comment</Text>
@@ -1484,6 +1494,60 @@ const styles = StyleSheet.create({
 });
 
 export default function App() {
+
+  
+ useEffect(() => {
+    // Handle deep links
+    const handleDeepLink = (event: { url: string }) => {
+      console.log('Deep link received:', event.url);
+      if (event.url.startsWith('mylivefeed://callback')) {
+        console.log('Twitter OAuth redirect:', event.url);
+        // Parse URL parameters
+        try {
+          const url = new URL(event.url);
+          // const code = url.searchParams.get('code');
+          // const state = url.searchParams.get('state');
+          // console.log('OAuth parameters:', { code, state });
+          // if (!code) {
+          //   console.warn('No OAuth code in redirect URL');
+          // }
+        } catch (error) {
+          console.error('Error parsing deep link URL:', error);
+        }
+      }
+    };
+
+    // Add event listener for incoming deep links
+    Linking.addEventListener('url', handleDeepLink);
+
+    // Check for initial URL
+    Linking.getInitialURL().then(url => {
+      if (url) {
+        console.log('Initial deep link:', url);
+        if (url.startsWith('mylivefeed://callback')) {
+          console.log('Initial Twitter OAuth redirect:', url);
+          // Parse URL parameters
+          try {
+            const parsedUrl = new URL(url);
+            // const code = parsedUrl.searchParams.get('code');
+            // const state = parsedUrl.searchParams.get('state');
+            // console.log('Initial OAuth parameters:', { code, state });
+            // if (!code) {
+            //   console.warn('No OAuth code in initial redirect URL');
+            // }
+          } catch (error) {
+            console.error('Error parsing initial deep link URL:', error);
+          }
+        }
+      }
+    });
+
+    // Cleanup listener on unmount
+    return () => {
+      Linking.removeAllListeners('url');
+    };
+  }, []);
+
   return (
     <SafeAreaProvider>
       <StatusBar backgroundColor="#15202B" barStyle="light-content" />
