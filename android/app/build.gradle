@@ -85,8 +85,9 @@ android {
         versionCode 1
         versionName "1.0"
         
-        manifestPlaceholders = [appAuthRedirectScheme: "mylivefeed"]
-
+        manifestPlaceholders = [
+            appAuthRedirectScheme: "mylivefeed"
+        ]
     }
     signingConfigs {
         debug {
